@@ -1,0 +1,20 @@
+{
+  "id": "./",
+  "name": "Control de Ingreso — Lector de QR para eventos",
+  "short_name": "Control Ingreso",
+  "description": "Registrá el ingreso a un evento leyendo códigos QR contra una lista de asistentes. Funciona sin conexión.",
+  "lang": "es-AR",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F8F3F4",
+  "theme_color": "#5A1627",
+  "categories": ["productivity", "business"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
