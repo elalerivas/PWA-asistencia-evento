@@ -4,7 +4,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.0.0';
+  const APP_VERSION = '1.2.0';
   const STORAGE_KEY = 'controlIngreso.v1';
   const LIBS = {
     xlsx: { src: 'lib/xlsx.full.min.js', ready: () => window.XLSX },
@@ -41,7 +41,7 @@
     return {
       v: 1,
       event: { name: '', date: '', place: '' },
-      settings: { palette: 'vino', theme: 'auto', sound: true, volume: 0.7, vibrate: true, veil: 0.76, blur: 0, facing: 'environment' },
+      settings: { palette: 'vino', theme: 'auto', contrast: 'soft', sound: true, volume: 0.7, vibrate: true, veil: 0.76, blur: 0, facing: 'environment' },
       headers: [], keyCol: -1, nameCols: [], fileName: '', importedAt: null,
       att: [], extras: [], log: [], iosHintClosed: false
     };
@@ -57,6 +57,17 @@
     return defaultState();
   }
   let state = loadState();
+
+  /* ---------- Sincronización: configuración y cola de envío (aparte del evento: no entra en las copias de seguridad) ---------- */
+  const SYNC_KEY = 'controlIngreso.sync';
+  function loadSync() {
+    const d = { on: false, url: '', key: '', device: '', interval: 5, sheet: '', book: '', lh: '', mh: '', lastOk: null, queue: [], seq: 0 };
+    try { const x = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null'); if (x && typeof x === 'object') return { ...d, ...x }; } catch (e) { /* noop */ }
+    return d;
+  }
+  const sync = loadSync();
+  const net = { timer: null, busy: false, fails: 0, status: sync.on ? 'init' : 'off', sending: new Set(), again: false };
+  function saveSync() { try { localStorage.setItem(SYNC_KEY, JSON.stringify(sync)); } catch (e) { /* noop */ } }
   let quotaWarned = false;
   function saveState() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {
@@ -175,17 +186,19 @@
 
   /* ---------- Registro de ingresos ---------- */
   function markPresent(a, via) {
-    a.inAt = new Date().toISOString(); a.via = via;
+    a.inAt = new Date().toISOString(); a.via = via; a.by = sync.on ? sync.device : null;
     const entry = addLog('in', { attId: a.id, label: displayName(a), via });
+    queueSet(a, true);
     saveState();
-    return () => { a.inAt = null; a.via = null; removeLog(entry); saveState(); renderAll(); };
+    return () => { a.inAt = null; a.via = null; a.by = null; removeLog(entry); queueSet(a, false); saveState(); renderAll(); };
   }
   function unmarkPresent(a) {
-    const prev = { inAt: a.inAt, via: a.via };
-    a.inAt = null; a.via = null;
+    const prev = { inAt: a.inAt, via: a.via, by: a.by };
+    a.inAt = null; a.via = null; a.by = null;
     const entry = addLog('mout', { attId: a.id, label: displayName(a) });
+    queueSet(a, false);
     saveState();
-    return () => { a.inAt = prev.inAt; a.via = prev.via; removeLog(entry); saveState(); renderAll(); };
+    return () => { a.inAt = prev.inAt; a.via = prev.via; a.by = prev.by; removeLog(entry); queueSet(a, true); saveState(); renderAll(); };
   }
   /** Procesa un código leído. No toca la interfaz. */
   function processScan(raw, via) {
@@ -254,6 +267,8 @@
     else if (kind === 'bad') { tone(311, 0, 0.14, 'sawtooth', v * 0.55); tone(233, 0.15, 0.3, 'sawtooth', v * 0.55); }
     else if (kind === 'rej') { tone(165, 0, 0.45, 'square', v * 0.4); }
   }
+
+  const applyLook = () => window.Palettes.apply(state.settings.palette, state.settings.theme, state.settings.contrast);
 
   /* ---------- Imagen de fondo (IndexedDB) ---------- */
   function idbOpen() {
@@ -377,7 +392,8 @@
     $('#progTxt').innerHTML = s.total ? `<b>${pct} %</b> de la lista ya ingresó${extra}` : 'Todavía no hay lista de asistentes';
     const b = $('#tabBadge'); b.hidden = !s.pending; b.textContent = s.pending;
     const sc = $('#scCount');
-    if (sc) sc.innerHTML = `${s.present} / ${s.total}<small>${s.pending ? plural(s.pending, 'por verificar', 'por verificar') : 'presentes'}</small>`;
+    const sh = sync.on ? syncShort() : '';
+    if (sc) sc.innerHTML = `${s.present} / ${s.total}<small>${s.pending ? plural(s.pending, 'por verificar', 'por verificar') : 'presentes'}${sh ? ' · ' + esc(sh) : ''}</small>`;
   }
   function renderTabs() {
     $$('.tabs [data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === ui.tab)));
@@ -405,6 +421,9 @@
       ${rows.length > shown.length ? `<button class="btn full more" data-more="1">Ver más (${rows.length - shown.length} restantes)</button>` : ''}`;
   }
   function listPanel() {
+    if (!state.att.length && sync.on) {
+      return `<div class="card empty"><h3>La hoja todavía no tiene asistentes</h3><p>Cuando se agreguen a la hoja de Google van a aparecer acá solos.</p></div>`;
+    }
     if (!state.att.length) {
       return `<div class="card empty"><h3>Empecemos por la lista</h3>
         <p>Importá el archivo Excel (.xlsx) o CSV con los asistentes. Después escaneá los QR y cada persona se marca sola como ingresada.</p>
@@ -439,9 +458,9 @@
     if (!state.log.length) return '<div class="card empty"><p>Todavía no hay movimientos. Cada lectura queda anotada acá con su hora.</p></div>';
     const rows = state.log.slice().reverse().slice(0, ui.limit);
     const text = (l) => {
-      const via = l.via === 'texto' ? ' · código escrito' : l.via === 'foto' ? ' · desde foto' : l.via === 'manual' ? ' · manual' : '';
+      const via = l.via === 'texto' ? ' · código escrito' : l.via === 'foto' ? ' · desde foto' : l.via === 'manual' ? ' · manual' : l.via === 'sync' ? ` · desde ${esc(l.by || 'otro teléfono')}` : '';
       if (l.type === 'in') return `<b>Ingreso:</b> ${esc(l.label)}<small>${via.replace(' · ', '')}</small>`;
-      if (l.type === 'dup') return `<b>Repetido:</b> ${esc(l.label)}<small>Ya había ingresado a las ${fmtHM(l.firstAt)}</small>`;
+      if (l.type === 'dup') return `<b>Repetido:</b> ${esc(l.label)}<small>Ya había ingresado a las ${fmtHM(l.firstAt)}${l.by ? ' · ' + esc(l.by) : ''}</small>`;
       if (l.type === 'mout') return `<b>Ingreso quitado:</b> ${esc(l.label)}`;
       if (l.type === 'import') return `<b>${esc(l.label)}</b>`;
       return `<b>${esc(l.label)}</b><small>${esc(String(l.raw || '').slice(0, 120))}</small>`;
@@ -647,7 +666,7 @@
   function openAttendee(id) {
     const a = findAtt(id); if (!a) return;
     openSheet(`<h2>${esc(displayName(a))}</h2>
-      <p>${a.inAt ? `<span class="badge valid">Presente</span> &nbsp;Ingresó a las <b>${fmtHMS(a.inAt)}</b>${a.via ? ` <span class="muted">(${{ qr: 'QR', texto: 'código escrito', foto: 'foto', manual: 'manual' }[a.via] || a.via})</span>` : ''}` : '<span class="badge pending">Falta</span> &nbsp;Todavía no ingresó'}</p>
+      <p>${a.inAt ? `<span class="badge valid">Presente</span> &nbsp;Ingresó a las <b>${fmtHMS(a.inAt)}</b>${a.via ? ` <span class="muted">(${{ qr: 'QR', texto: 'código escrito', foto: 'foto', manual: 'manual', sync: 'otro teléfono' }[a.via] || a.via})</span>` : ''}${a.by ? ` <span class="muted">· ${esc(a.by)}</span>` : ''}` : '<span class="badge pending">Falta</span> &nbsp;Todavía no ingresó'}</p>
       <div class="detail">${state.headers.map((h, j) => (a.cells[j] ? `<div><span class="k">${esc(h)}</span><span class="v">${esc(a.cells[j])}</span></div>` : '')).join('')}</div>
       <div class="sheet-actions"><button class="btn ghost" id="atC">Cerrar</button>
         ${a.inAt ? '<button class="btn bad" id="atOut">Quitar ingreso</button>' : '<button class="btn ok" id="atIn">Registrar ingreso a mano</button>'}</div>`,
@@ -668,26 +687,29 @@
         <div class="palettes">${window.PALETTES.map((p) => `<button class="pal" data-pal="${p.id}" aria-pressed="${s.palette === p.id}" style="--c1:${p.light.brand};--c2:${p.light.accent}"><span class="sw"></span>${esc(p.name)}</button>`).join('')}</div>
         <h3>Tema</h3>
         <div class="seg">${[['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro']].map(([k, l]) => `<button data-theme="${k}" aria-pressed="${s.theme === k}">${l}</button>`).join('')}</div>
+        <h3>Contraste</h3>
+        <div class="seg">${[['soft', 'Suave'], ['normal', 'Intenso']].map(([k, l]) => `<button data-contrast="${k}" aria-pressed="${s.contrast === k}">${l}</button>`).join('')}</div>
         <h3>Imagen de fondo</h3>
         <p class="muted">Opcional. Se suaviza para que el texto se lea siempre bien; elegí una foto sobria (una textura, un salón, una copa…).</p>
         <div class="sheet-actions" style="margin-top:6px"><button class="btn" id="bgPick"><svg width="18" height="18"><use href="#i-img"/></svg> Elegir imagen</button>
           <button class="btn ghost" id="bgDel" ${document.body.classList.contains('has-bg') ? '' : 'disabled'}>Quitar</button></div>
-        <label class="field" style="margin-top:12px"><span>Intensidad del fondo</span><input type="range" id="bgVeil" min="0.45" max="0.97" step="0.01" value="${s.veil}" style="direction:rtl"></label>
+        <label class="field" style="margin-top:12px"><span>Intensidad del fondo</span><input type="range" id="bgVeil" min="0" max="100" step="1" value="${Math.round(((0.97 - s.veil) / 0.52) * 100)}"></label>
         <label class="field"><span>Desenfoque</span><input type="range" id="bgBlur" min="0" max="14" step="1" value="${s.blur}"></label>
         <div class="sheet-actions"><button class="btn primary" id="apOk">Listo</button></div>`;
     };
     openSheet('<div id="apBody"></div>', (root) => {
       const body = $('#apBody', root); paint(body);
       body.addEventListener('click', (e) => {
-        const pal = e.target.closest('[data-pal]'); const th = e.target.closest('[data-theme]');
-        if (pal) { state.settings.palette = pal.dataset.pal; window.Palettes.apply(state.settings.palette, state.settings.theme); saveState(); paint(body); }
-        else if (th) { state.settings.theme = th.dataset.theme; window.Palettes.apply(state.settings.palette, state.settings.theme); saveState(); paint(body); }
+        const pal = e.target.closest('[data-pal]'); const th = e.target.closest('[data-theme]'); const ct = e.target.closest('[data-contrast]');
+        if (pal) { state.settings.palette = pal.dataset.pal; applyLook(); saveState(); paint(body); }
+        else if (th) { state.settings.theme = th.dataset.theme; applyLook(); saveState(); paint(body); }
+        else if (ct) { state.settings.contrast = ct.dataset.contrast; applyLook(); saveState(); paint(body); }
         else if (e.target.closest('#bgPick')) $('#fileBg').click();
         else if (e.target.closest('#bgDel')) { bgDel().then(() => { applyBg(null); paint(body); }); }
         else if (e.target.closest('#apOk')) closeSheet();
       });
       body.addEventListener('input', (e) => {
-        if (e.target.id === 'bgVeil') { state.settings.veil = +e.target.value; applyBgLook(); }
+        if (e.target.id === 'bgVeil') { state.settings.veil = Math.round((0.97 - (+e.target.value / 100) * 0.52) * 100) / 100; applyBgLook(); }
         if (e.target.id === 'bgBlur') { state.settings.blur = +e.target.value; applyBgLook(); }
       });
       body.addEventListener('change', () => saveState());
@@ -742,6 +764,7 @@
       <div class="menu-list">
         <button class="btn" data-m="event">Datos del evento<small>Nombre, fecha y lugar</small></button>
         <button class="btn" data-m="import">Importar lista de asistentes<small>${state.att.length ? `${plural(state.att.length, 'persona', 'personas')} · ${esc(state.fileName || '')}` : 'Excel (.xlsx) o CSV'}</small></button>
+        <button class="btn" data-m="sync">Sincronizar con Google Sheets<small>${sync.on ? `Conectado · ${esc(sync.device)}${syncShort() ? ' · ' + esc(syncShort()) : ''}` : 'Compartir los ingresos entre varios teléfonos'}</small></button>
         ${state.att.length ? '<button class="btn" data-m="cols">Columnas y coincidencia<small>Qué dato trae el QR, cómo se muestra el nombre y probar un código</small></button>' : ''}
         <button class="btn" data-m="look">Colores y fondo<small>Paletas, tema claro u oscuro e imagen de fondo</small></button>
         <button class="btn" data-m="sound">Sonido y vibración</button>
@@ -765,7 +788,14 @@
   }
   async function handleMenu(m) {
     if (m === 'event') openEventSheet();
-    else if (m === 'import') $('#fileXlsx').click();
+    else if (m === 'sync') openSyncSheet();
+    else if (m === 'import') {
+      if (sync.on) {
+        if (!(await confirmSheet('Este teléfono está sincronizado', 'La lista viene de la hoja de Google. Para importar un archivo hay que dejar de sincronizar primero.', 'Dejar de sincronizar e importar'))) return;
+        syncDisconnect();
+      }
+      $('#fileXlsx').click();
+    }
     else if (m === 'cols') openColumnsSheet();
     else if (m === 'look') openAppearance();
     else if (m === 'sound') openSoundSheet();
@@ -774,12 +804,13 @@
     else if (m === 'update') checkForUpdate(true);
     else if (m === 'force') forceUpdate();
     else if (m === 'reset') {
-      if (await confirmSheet('¿Reiniciar los ingresos?', 'Todos vuelven a figurar como “Faltan” y se borran los registros y las lecturas por verificar. La lista de asistentes se conserva.', 'Reiniciar', true)) {
-        state.att.forEach((a) => { a.inAt = null; a.via = null; }); state.extras = []; state.log = [];
+      if (await confirmSheet('¿Reiniciar los ingresos?', `Todos vuelven a figurar como “Faltan” y se borran los registros y las lecturas por verificar. La lista de asistentes se conserva.${sync.on ? ' <b>También se borran los ingresos de la hoja de Google y de los otros teléfonos.</b>' : ''}`, 'Reiniciar', true)) {
+        state.att.forEach((a) => { if (a.inAt) queueSet(a, false); a.inAt = null; a.via = null; a.by = null; }); state.extras = []; state.log = [];
         saveState(); renderAll(); toast('Ingresos reiniciados');
       }
     } else if (m === 'wipe') {
-      if (await confirmSheet('¿Borrar todo el evento?', 'Se borran la lista, los ingresos y los registros. Los datos del evento y la apariencia se conservan. Esto no se puede deshacer.', 'Borrar todo', true)) {
+      if (await confirmSheet('¿Borrar todo el evento?', `Se borran la lista, los ingresos y los registros de este teléfono. Los datos del evento y la apariencia se conservan. Esto no se puede deshacer.${sync.on ? ' Se deja de sincronizar con la hoja (la hoja no se toca).' : ''}`, 'Borrar todo', true)) {
+        if (sync.on) syncDisconnect();
         state.att = []; state.extras = []; state.log = []; state.headers = []; state.keyCol = -1; state.nameCols = []; state.fileName = ''; state.importedAt = null;
         idx = null; sIdx = null; saveState(); renderAll(); toast('Evento vaciado');
       }
@@ -807,8 +838,8 @@
       if (!(await confirmSheet('¿Recuperar esta copia?', `Reemplaza todo lo que hay ahora en este dispositivo por la copia (${plural(data.state.att.length, 'asistente', 'asistentes')}).`, 'Recuperar', true))) return;
       const d = defaultState();
       state = { ...d, ...data.state, event: { ...d.event, ...data.state.event }, settings: { ...d.settings, ...data.state.settings } };
-      idx = null; sIdx = null; saveState();
-      window.Palettes.apply(state.settings.palette, state.settings.theme); applyBgLook(); renderAll(); toast('Copia recuperada');
+      idx = null; sIdx = null; if (sync.on) syncDisconnect(); saveState();
+      applyLook(); applyBgLook(); renderAll(); toast(sync.url ? 'Copia recuperada. Se dejó de sincronizar con la hoja.' : 'Copia recuperada');
     } catch (e) { toast('Ese archivo no es una copia válida'); }
   }
 
@@ -1032,7 +1063,7 @@
       const p = e.target.closest('[data-pick]');
       if (p) {
         chosen = true; closeSheet(); const a = findAtt(p.dataset.pick);
-        if (a.inAt) { feedback('dup'); showMsg('warn', 'Ya había ingresado', displayName(a), `Primer ingreso a las ${fmtHMS(a.inAt)}`); } else { const undo = markPresent(a, res.via); feedback('ok'); renderAll(); showMsg('ok', 'Ingreso registrado', displayName(a), subline(a), undo); }
+        if (a.inAt) { feedback('dup'); showMsg('warn', 'Ya había ingresado', displayName(a), `Primer ingreso a las ${fmtHMS(a.inAt)}${a.by ? ' · ' + a.by : ''}`); } else { const undo = markPresent(a, res.via); feedback('ok'); renderAll(); showMsg('ok', 'Ingreso registrado', displayName(a), subline(a), undo); }
       } else if (e.target.closest('#amN')) { chosen = true; closeSheet(); const r = registerUnlisted(res.raw, res.via); renderAll(); feedback('bad'); if (r.kind === 'unlisted') unlistedSheet(r.extra); }
     }), () => { sc.busy = false; if (!chosen) renderAll(); });
   }
@@ -1048,7 +1079,7 @@
     if (r.kind === 'in') {
       feedback('ok'); showMsg('ok', 'Ingreso registrado', displayName(r.att), [subline(r.att), fmtHM(r.att.inAt)].filter(Boolean).join(' · '), r.undo);
     } else if (r.kind === 'dup') {
-      feedback('dup'); showMsg('warn', 'Ya había ingresado', displayName(r.att), `Primer ingreso a las ${fmtHMS(r.att.inAt)}`);
+      feedback('dup'); showMsg('warn', 'Ya había ingresado', displayName(r.att), `Primer ingreso a las ${fmtHMS(r.att.inAt)}${r.att.by ? ' · ' + r.att.by : ''}`);
     } else if (r.kind === 'ambiguous') {
       feedback('bad'); ambiguousSheet(r);
     } else if (r.kind === 'unlisted') {
@@ -1194,11 +1225,274 @@
     if ($('#scanner').hidden) return;
     if (document.visibilityState === 'hidden') stopCamera(); else if (!sc.stream) startCamera();
   });
-  window.addEventListener('storage', (e) => { if (e.key === STORAGE_KEY && e.newValue) { state = loadState(); idx = null; sIdx = null; window.Palettes.apply(state.settings.palette, state.settings.theme); applyBgLook(); renderAll(); } });
+  window.addEventListener('storage', (e) => { if (e.key === STORAGE_KEY && e.newValue) { state = loadState(); idx = null; sIdx = null; applyLook(); applyBgLook(); renderAll(); } });
+
+  /* ---------- Sincronización con Google Sheets ---------- */
+  const PROTO = 1;
+  const syncErr = (code, msg) => { const e = new Error(msg || code); e.code = code; return e; };
+  function syncErrText(e) {
+    const m = {
+      net: 'No se pudo conectar con el script. Revisá que la dirección termine en /exec, que el acceso esté en «Cualquier persona» y que haya señal.',
+      clave: 'La clave no coincide con la que está en el script.',
+      config: 'En el script todavía está la clave de ejemplo. Cambiala por una propia y guardá.',
+      ocupado: 'La hoja estaba ocupada. Probá de nuevo en unos segundos.',
+      hoja: 'No se encontró la pestaña de la lista. Revisá HOJA en el script.',
+      proto: 'El script instalado es de otra versión. Pegá el código nuevo de la app y volvé a implementar.',
+      bad: 'El script respondió algo inesperado. Revisá que sea el código de esta app y que la implementación esté actualizada.'
+    };
+    return m[e && e.code] || (e && e.message) || m.bad;
+  }
+  /** Llama al script de la hoja. Los POST con text/plain no necesitan "preflight" (CORS) y siguen la redirección de Google. */
+  async function gs(action, extra) {
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 25000);
+    let data;
+    try {
+      const res = await fetch(sync.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action, key: sync.key, ...extra }), signal: ctl.signal, redirect: 'follow' });
+      try { data = await res.json(); } catch (e) { throw syncErr('bad'); }
+    } catch (e) { throw e.code ? e : syncErr('net'); } finally { clearTimeout(to); }
+    if (!data || data.ok !== true) throw syncErr((data && data.err) || 'bad', data && data.msg);
+    if (data.proto !== PROTO) throw syncErr('proto');
+    return data;
+  }
+
+  const syncEvery = () => Math.max(1, Math.min(60, +sync.interval || 5)) * 1000;
+  function syncSchedule(ms) { clearTimeout(net.timer); net.timer = sync.on ? setTimeout(syncTick, ms) : null; }
+  function syncKick(ms) { net.again = true; if (sync.on && !net.busy) syncSchedule(ms == null ? 250 : ms); }
+  function syncShort() {
+    const n = sync.queue.length;
+    if (net.status === 'auth') return 'clave incorrecta';
+    if (net.status === 'offline') return n ? `sin conexión · ${n} sin enviar` : 'sin conexión';
+    if (net.status === 'err') return n ? `sin respuesta · ${n} sin enviar` : 'sin respuesta de la hoja';
+    if (n) return `${n} sin enviar`;
+    return '';
+  }
+  function syncPillRender() {
+    const p = $('#syncPill'); if (!p) return;
+    if (!sync.on) { p.hidden = true; renderStats(); return; }
+    const bad = net.status === 'auth'; const warn = !bad && (net.status === 'offline' || net.status === 'err' || sync.queue.length > 0);
+    p.className = 'sync-pill' + (bad ? ' bad' : warn ? ' warn' : '');
+    const s = syncShort(); p.textContent = s ? s.charAt(0).toUpperCase() + s.slice(1) : (net.status === 'init' ? 'Conectando…' : 'Sincronizado');
+    p.title = sync.lastOk ? `Última sincronización: ${fmtHMS(sync.lastOk)}` : 'Todavía no sincronizó';
+    p.hidden = false; renderStats();
+  }
+
+  /** Marca en la cola (un ingreso o su anulación) para enviar a la hoja. Se manda enseguida si hay señal; si no, queda guardado. */
+  function queueSet(a, present) {
+    if (!sync.on || !a.sig) return;
+    sync.queue = sync.queue.filter((o) => o.sig !== a.sig || net.sending.has(o.q));
+    sync.queue.push({ q: ++sync.seq, sig: a.sig, v: !!present, t: present ? (Date.parse(a.inAt) || Date.now()) : Date.now(), b: sync.device });
+    saveSync(); syncPillRender(); syncKick();
+  }
+
+  async function syncTick() {
+    if (!sync.on || net.busy) return;
+    if (document.visibilityState === 'hidden') { syncSchedule(syncEvery()); return; }
+    if (!navigator.onLine) { net.status = 'offline'; syncPillRender(); syncSchedule(syncEvery()); return; }
+    net.busy = true; net.again = false;
+    const ops = sync.queue.slice(0, 150);
+    net.sending = new Set(ops.map((o) => o.q));
+    try {
+      const res = await gs('sync', { ops, lh: sync.lh, mh: sync.mh });
+      await syncApply(res, ops);
+      net.fails = 0; net.status = 'ok'; sync.lastOk = new Date().toISOString();
+    } catch (e) {
+      net.fails++;
+      net.status = (e.code === 'clave' || e.code === 'config') ? 'auth' : navigator.onLine ? 'err' : 'offline';
+    } finally { net.sending = new Set(); net.busy = false; saveSync(); syncPillRender(); }
+    const more = sync.queue.length > 0 && net.status === 'ok';
+    syncSchedule(net.again || more ? 250 : syncEvery() * (1 + Math.min(net.fails, 4)));
+  }
+
+  async function syncApply(res, ops) {
+    const sent = new Set(ops.map((o) => o.q));
+    const bySig = new Map(state.att.map((a) => [a.sig, a]));
+    const byQ = new Map((res.results || []).map((r) => [r.q, r]));
+    sync.queue = sync.queue.filter((o) => !sent.has(o.q));
+    let lost = 0; const conflicts = []; let changed = false;
+    ops.forEach((o) => {
+      const r = byQ.get(o.q);
+      if (!r || !r.ok) { lost++; return; }
+      if (o.v && r.already && !r.same) { const a = bySig.get(o.sig); if (a) conflicts.push({ a, r }); }
+    });
+    conflicts.forEach(({ a, r }) => {
+      if (r.t) a.inAt = new Date(r.t).toISOString();
+      a.by = r.b || null; a.via = 'sync'; changed = true;
+      addLog('dup', { attId: a.id, label: displayName(a), firstAt: a.inAt, via: 'sync', by: r.b });
+    });
+    if (res.lh !== sync.lh) {
+      await syncPull(false); changed = true;
+    } else if (res.marks) {
+      if (syncMarks(res.marks, false)) changed = true;
+      sync.mh = res.mh;
+    } else sync.mh = res.mh;
+    saveState();
+    if (changed || lost || conflicts.length) renderAll();
+    if (conflicts.length) {
+      feedback('dup');
+      const { a, r } = conflicts[0];
+      toast(conflicts.length === 1
+        ? `${displayName(a)} ya había ingresado${r.b ? ' por ' + r.b : ''}${r.t ? ' a las ' + fmtHM(new Date(r.t).toISOString()) : ''}`
+        : `${conflicts.length} personas ya habían ingresado por otro teléfono`);
+    } else if (lost) toast(`${plural(lost, 'ingreso no se pudo', 'ingresos no se pudieron')} escribir en la hoja (la fila ya no existe). Recargá la lista.`);
+  }
+
+  /** Aplica a la lista local el estado de ingresos de la hoja, salvo lo que este teléfono todavía no envió. Devuelve cuántos cambió. */
+  function syncMarks(list, quiet) {
+    const m = new Map(list.map((x) => [x.s, x]));
+    const pend = new Set(sync.queue.map((o) => o.sig));
+    let ch = 0;
+    state.att.forEach((a) => {
+      if (!a.sig || pend.has(a.sig)) return;
+      const r = m.get(a.sig);
+      if (r) {
+        const iso = r.t != null ? new Date(r.t).toISOString() : null;
+        if (!a.inAt) {
+          a.inAt = iso || new Date().toISOString(); a.via = 'sync'; a.by = r.b || null; ch++;
+          if (!quiet) addLog('in', { t: a.inAt, attId: a.id, label: displayName(a), via: 'sync', by: r.b });
+        } else {
+          if (iso && Math.abs(new Date(a.inAt) - new Date(iso)) > 2000) { a.inAt = iso; ch++; }
+          if (r.b && r.b !== a.by) { a.by = r.b; ch++; }
+        }
+      } else if (a.inAt) {
+        a.inAt = null; a.via = null; a.by = null; ch++;
+        if (!quiet) addLog('mout', { attId: a.id, label: displayName(a), via: 'sync' });
+      }
+    });
+    return ch;
+  }
+
+  /** Arma la lista local a partir de lo que devolvió el script. replace: primera conexión; si no, se fusiona conservando lo local pendiente. */
+  function applyPull(d, replace) {
+    const prevKey = state.headers[state.keyCol]; const prevNames = state.nameCols.map((i) => state.headers[i]);
+    const old = replace ? new Map() : new Map(state.att.map((a) => [a.sig, a]));
+    let added = 0;
+    const att = d.rows.map((r) => {
+      let a = old.get(r.s);
+      if (a) old.delete(r.s); else { a = { id: uid(), cells: r.c, inAt: null, via: null, by: null }; added++; }
+      a.cells = r.c; a.sig = r.s; a.row = r.r;
+      return a;
+    });
+    const removed = old.size;
+    state.att = att; state.headers = d.headers;
+    const tbl = { headers: d.headers, rows: d.rows.map((r) => r.c) };
+    const find = (name) => (name == null ? -1 : d.headers.findIndex((h) => norm(h) === norm(name)));
+    if (replace) { state.keyCol = -1; state.nameCols = tbl.rows.length ? guessNameCols(tbl) : [0]; }
+    else {
+      state.keyCol = find(prevKey);
+      const nc = prevNames.map(find).filter((i) => i >= 0);
+      state.nameCols = nc.length ? nc : (tbl.rows.length ? guessNameCols(tbl) : [0]);
+    }
+    syncMarks(d.marks || [], replace);
+    sync.lh = d.lh; sync.mh = d.mh; sync.sheet = d.hoja; sync.book = d.libro;
+    state.fileName = `Hoja de Google: ${d.libro}`; state.importedAt = new Date().toISOString();
+    idx = null; sIdx = null;
+    return { added, removed };
+  }
+  async function syncPull(replace) {
+    const d = await gs('pull');
+    const { added, removed } = applyPull(d, replace);
+    if (!replace && (added || removed)) {
+      const txt = `La lista de la hoja cambió: ${added ? `${added} nuevos` : ''}${added && removed ? ', ' : ''}${removed ? `${removed} quitados` : ''}`;
+      addLog('import', { label: txt }); toast(txt);
+    }
+  }
+  function syncDisconnect() {
+    sync.on = false; sync.queue = []; sync.lh = ''; sync.mh = ''; net.status = 'off'; net.fails = 0;
+    clearTimeout(net.timer); net.timer = null;
+    saveSync(); syncPillRender();
+  }
+
+  function statusLine() {
+    const t = sync.lastOk ? fmtHMS(sync.lastOk) : 'todavía no';
+    const st = net.status === 'ok' ? 'Todo al día' : net.status === 'auth' ? 'La clave dejó de coincidir' : net.status === 'offline' ? 'Sin conexión' : net.status === 'err' ? 'La hoja no responde' : 'Conectando…';
+    const n = sync.queue.length;
+    return `${st} · última sincronización: ${t}${n ? ` · ${plural(n, 'cambio sin enviar', 'cambios sin enviar')}` : ''}`;
+  }
+  function openSyncSheet() {
+    if (sync.on) { openSyncStatus(); return; }
+    openSheet('<div id="syBody"></div>', (root) => {
+      const showForm = (msgText, bad) => {
+        root.innerHTML = `<h2>Sincronizar con Google Sheets</h2>
+          <p class="muted">Varios teléfonos comparten en vivo quién ya ingresó a través de una hoja de cálculo de Google. Primero instalá el script en la hoja (guía en <b>apps-script/LEEME.md</b>).</p>
+          <label class="field"><span>Dirección del script (termina en /exec)</span><input type="url" id="syUrl" value="${esc(sync.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+          <label class="field"><span>Clave</span><input type="password" id="syKey" value="${esc(sync.key)}" autocomplete="off"></label>
+          <label class="field"><span>Nombre de este teléfono</span><input type="text" id="syDev" value="${esc(sync.device)}" maxlength="40" placeholder="Ej.: Puerta 1" autocomplete="off"></label>
+          <p class="muted" id="syMsg" role="status" style="${bad ? 'color:var(--bad)' : ''}">${esc(msgText || '')}</p>
+          <div class="sheet-actions"><button class="btn ghost" id="syC">Cancelar</button><button class="btn primary" id="syGo">Conectar</button></div>`;
+        $('#syC', root).onclick = closeSheet;
+        $('#syGo', root).onclick = go;
+      };
+      const go = async () => {
+        const url = $('#syUrl', root).value.trim(); const key = $('#syKey', root).value.trim(); let dev = $('#syDev', root).value.trim().slice(0, 40);
+        const msg = $('#syMsg', root); const btn = $('#syGo', root);
+        const bail = (t) => { msg.textContent = t; msg.style.color = 'var(--bad)'; };
+        if (!/^https:\/\/script\.google\.com\/|^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url)) { bail('La dirección tiene que empezar con https://script.google.com/ y terminar en /exec.'); return; }
+        if (!key) { bail('Escribí la clave.'); return; }
+        if (!dev) dev = 'Teléfono ' + Math.floor(100 + Math.random() * 900);
+        msg.style.color = ''; msg.textContent = 'Conectando con la hoja…'; btn.disabled = true;
+        sync.url = url; sync.key = key; sync.device = dev;
+        try {
+          const d = await gs('pull');
+          confirmConnect(d);
+        } catch (e) { showForm(syncErrText(e), true); }
+      };
+      const confirmConnect = (d) => {
+        root.innerHTML = `<h2>Conectar con la hoja</h2>
+          <p><b>${esc(d.libro)}</b> · pestaña «${esc(d.hoja)}»</p>
+          <p>${plural(d.rows.length, 'persona', 'personas')} en la lista${d.marks.length ? `, <b>${d.marks.length}</b> ya ingresadas` : ''}.</p>
+          ${state.att.length ? `<p class="muted"><b>Atención:</b> la lista actual de este teléfono (${plural(state.att.length, 'persona', 'personas')}) se reemplaza por la de la hoja, junto con sus ingresos, registros y lecturas por verificar. Si querés conservar algo, exportalo antes.</p>` : ''}
+          <p class="muted">La hoja tiene las columnas INGRESADO, HORA INGRESO y REGISTRADO POR (el script las agrega si faltan). Desde ahora cada ingreso se escribe ahí y se comparte con los otros teléfonos.</p>
+          <div class="sheet-actions"><button class="btn ghost" id="syC">Cancelar</button><button class="btn primary" id="syOk">Conectar y cargar la lista</button></div>`;
+        $('#syC', root).onclick = closeSheet;
+        $('#syOk', root).onclick = () => {
+          sync.on = true; sync.queue = []; sync.seq = 0; net.status = 'ok'; net.fails = 0; sync.lastOk = new Date().toISOString();
+          state.extras = []; state.log = [];
+          applyPull(d, true);
+          addLog('import', { label: `Lista cargada desde la hoja: ${plural(d.rows.length, 'asistente', 'asistentes')} (${d.libro})` });
+          ui.filter = 'all'; ui.q = ''; ui.limit = 150; ui.tab = 'lista';
+          saveState(); saveSync(); closeSheet(); renderAll(); syncPillRender(); syncSchedule(syncEvery());
+          if (state.att.length) openColumnsSheet(); else toast('Conectado. La hoja todavía no tiene asistentes: van a aparecer solos.');
+        };
+      };
+      showForm();
+    });
+  }
+  function openSyncStatus() {
+    openSheet('<div id="syBody"></div>', (root) => {
+      const paint = () => {
+        const ints = [...new Set([3, 5, 10, 20, 30, Math.round(+sync.interval || 5)])].sort((x, y) => x - y);
+        root.innerHTML = `<h2>Sincronización</h2>
+          <p><span class="badge valid">Conectado</span> &nbsp;<b>${esc(sync.book || 'Hoja de Google')}</b>${sync.sheet ? ` · ${esc(sync.sheet)}` : ''}</p>
+          <p class="muted" id="syInfo">${esc(statusLine())}</p>
+          <label class="field"><span>Nombre de este teléfono</span><input type="text" id="syDev" value="${esc(sync.device)}" maxlength="40" autocomplete="off"></label>
+          <label class="field"><span>Consultar la hoja cada</span><select id="syInt">${ints.map((s) => `<option value="${s}" ${Math.round(+sync.interval) === s ? 'selected' : ''}>${s} segundos</option>`).join('')}</select></label>
+          <p class="muted">Menos segundos = cambios más rápidos entre teléfonos, pero más batería y datos.</p>
+          <div class="sheet-actions"><button class="btn" id="syNow">Sincronizar ahora</button><button class="btn" id="syReload">Recargar la lista</button></div>
+          <div class="sheet-actions"><button class="btn ghost" id="syC">Cerrar</button><button class="btn danger" id="syOff">Dejar de sincronizar</button></div>`;
+      };
+      paint();
+      root.addEventListener('change', (e) => {
+        if (e.target.id === 'syDev') { sync.device = e.target.value.trim().slice(0, 40) || sync.device; saveSync(); }
+        else if (e.target.id === 'syInt') { sync.interval = +e.target.value; saveSync(); syncSchedule(syncEvery()); }
+      });
+      root.addEventListener('click', async (e) => {
+        const id = (e.target.closest('button') || {}).id;
+        if (id === 'syC') closeSheet();
+        else if (id === 'syNow') { closeSheet(); toast('Sincronizando…'); syncKick(0); }
+        else if (id === 'syReload') { sync.lh = ''; saveSync(); closeSheet(); toast('Recargando la lista desde la hoja…'); syncKick(0); }
+        else if (id === 'syOff') {
+          closeSheet();
+          if (await confirmSheet('¿Dejar de sincronizar?', `Este teléfono conserva la lista y los ingresos que tiene, pero ya no los comparte con la hoja ni con los otros teléfonos.${sync.queue.length ? ` Los ${sync.queue.length} cambios que todavía no se enviaron <b>no</b> llegarán a la hoja.` : ''}`, 'Dejar de sincronizar', true)) { syncDisconnect(); toast('Sincronización desactivada'); }
+        }
+      });
+    });
+  }
 
   /* ---------- Conexión, instalación y actualizaciones ---------- */
   function updateOnline() { $('#offlinePill').hidden = navigator.onLine; }
-  window.addEventListener('online', updateOnline); window.addEventListener('offline', updateOnline);
+  window.addEventListener('online', () => { updateOnline(); syncKick(0); });
+  window.addEventListener('offline', () => { updateOnline(); if (sync.on) { net.status = 'offline'; syncPillRender(); } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncKick(0); });
   const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
   if (isIOS() && !isStandalone() && !state.iosHintClosed) $('#iosHint').hidden = false;
@@ -1238,10 +1532,11 @@
   }
 
   /* ---------- Inicio ---------- */
-  window.ControlIngreso = { processScan, matchAttendee, getState: () => state }; // útil para pruebas
+  window.ControlIngreso = { processScan, matchAttendee, getState: () => state, getSync: () => sync }; // útil para pruebas
   if (/[?&]v=\d+/.test(location.search)) { try { window.history.replaceState(null, '', location.pathname); toast(`App actualizada a v${APP_VERSION}`); } catch (e) { /* noop */ } }
-  window.Palettes.apply(state.settings.palette, state.settings.theme);
+  applyLook();
   applyBgLook();
   bgGet().then((u) => { if (u) applyBg(u); });
-  updateOnline(); syncSoundBtn(); saveState(); renderAll();
+  updateOnline(); syncSoundBtn(); saveState(); renderAll(); syncPillRender();
+  if (sync.on) syncSchedule(200);
 })();
