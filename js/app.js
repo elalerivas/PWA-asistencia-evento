@@ -4,7 +4,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.3.0';
+  const APP_VERSION = '1.3.1';
   const STORAGE_KEY = 'controlIngreso.v1';
   const LIBS = {
     xlsx: { src: 'lib/xlsx.full.min.js', ready: () => window.XLSX },
@@ -1242,6 +1242,12 @@
       proto: 'El script instalado es de otra versión. Pegá el código nuevo de la app y volvé a implementar.',
       bad: 'El script respondió algo inesperado. Revisá que sea el código de esta app y que la implementación esté actualizada.'
     };
+    if (e && e.code === 'proto') {
+      const have = e.have;
+      if (typeof have === 'number' && have < PROTO) return `El script instalado es más viejo que la app (script v${have}, la app necesita v${PROTO}). Pegá el Code.gs nuevo y, en Implementar → Administrar implementaciones → ✏, elegí «Nueva versión» y tocá Implementar. Guardar solo no alcanza.`;
+      if (typeof have === 'number' && have > PROTO) return `El script es más nuevo que esta app (script v${have}, la app es v${PROTO}). Actualizá la app: Menú → Buscar actualización.`;
+      return 'Esa dirección no responde como el script de esta app. Revisá que sea la URL de la aplicación web (termina en /exec) y que el código sea el Code.gs de la app.';
+    }
     return m[e && e.code] || (e && e.message) || m.bad;
   }
   /** Llama al script de la hoja. Los POST con text/plain no necesitan "preflight" (CORS) y siguen la redirección de Google. */
@@ -1253,7 +1259,7 @@
       try { data = await res.json(); } catch (e) { throw syncErr('bad'); }
     } catch (e) { throw e.code ? e : syncErr('net'); } finally { clearTimeout(to); }
     if (!data || data.ok !== true) throw syncErr((data && data.err) || 'bad', data && data.msg);
-    if (data.proto !== PROTO) throw syncErr('proto');
+    if (data.proto !== PROTO) { const er = syncErr('proto'); er.have = data.proto; throw er; }
     return data;
   }
 
