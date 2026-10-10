@@ -4,7 +4,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.2.0';
+  const APP_VERSION = '1.3.0';
   const STORAGE_KEY = 'controlIngreso.v1';
   const LIBS = {
     xlsx: { src: 'lib/xlsx.full.min.js', ready: () => window.XLSX },
@@ -61,7 +61,7 @@
   /* ---------- Sincronización: configuración y cola de envío (aparte del evento: no entra en las copias de seguridad) ---------- */
   const SYNC_KEY = 'controlIngreso.sync';
   function loadSync() {
-    const d = { on: false, url: '', key: '', device: '', interval: 5, sheet: '', book: '', lh: '', mh: '', lastOk: null, queue: [], seq: 0 };
+    const d = { on: false, url: '', key: '', device: '', interval: 5, sheet: '', book: '', lh: '', mh: '', xh: '', lastOk: null, queue: [], seq: 0 };
     try { const x = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null'); if (x && typeof x === 'object') return { ...d, ...x }; } catch (e) { /* noop */ }
     return d;
   }
@@ -223,19 +223,21 @@
     const key = norm(raw);
     const prev = state.extras.find((e) => norm(e.raw) === key);
     if (prev) { addLog('unl', { exId: prev.id, label: 'Lectura repetida de un código no listado', raw, again: true }); saveState(); return { kind: 'again', extra: prev }; }
-    const ex = { id: uid(), raw, at: new Date().toISOString(), status: 'pending', via };
+    const ex = { id: uid(), raw, at: new Date().toISOString(), status: 'pending', via, by: sync.on ? sync.device : null };
     state.extras.push(ex);
     const entry = addLog('unl', { exId: ex.id, label: 'No figura en la lista', raw });
+    queueExtra(ex);
     saveState();
-    return { kind: 'unlisted', extra: ex, undo: () => { state.extras = state.extras.filter((e) => e !== ex); removeLog(entry); saveState(); renderAll(); } };
+    return { kind: 'unlisted', extra: ex, undo: () => { state.extras = state.extras.filter((e) => e !== ex); removeLog(entry); queueExtra(ex, true); saveState(); renderAll(); } };
   }
   function setExtraStatus(ex, status) {
-    const before = ex.status;
+    const before = ex.status; const beforeAt = ex.decidedAt;
     if (before === status) return () => {};
     ex.status = status; ex.decidedAt = status === 'pending' ? null : new Date().toISOString();
     const entry = addLog(status === 'valid' ? 'val' : status === 'rejected' ? 'rej' : 'unl', { exId: ex.id, raw: ex.raw, label: status === 'valid' ? 'Ingreso válido (no listado)' : status === 'rejected' ? 'Ingreso rechazado (no listado)' : 'Vuelto a pendiente' });
+    queueExtra(ex);
     saveState();
-    return () => { ex.status = before; removeLog(entry); saveState(); renderAll(); };
+    return () => { ex.status = before; ex.decidedAt = beforeAt; removeLog(entry); queueExtra(ex); saveState(); renderAll(); };
   }
 
   /* ---------- Sonido y vibración ---------- */
@@ -446,7 +448,7 @@
     const head = `<div class="filters">${f('pending', 'Pendientes', s.pending)}${f('valid', 'Válidos', s.valid)}${f('rejected', 'Rechazados', s.rejected)}${f('all', 'Todos', state.extras.length)}</div>`;
     if (!rows.length) return head + `<div class="card empty"><p>${state.extras.length ? 'No hay lecturas en esta categoría.' : 'Acá aparecen los QR que no figuran en la lista, para que decidas si dejás pasar a la persona o no.'}</p></div>`;
     return head + `<ul class="card items">${rows.map((e) => `<li class="vitem">
-      <div class="top"><span><span class="badge ${e.status}">${STATUS_TXT[e.status]}</span> &nbsp;${fmtHMS(e.at)}</span><span>${e.decidedAt ? 'decidido ' + fmtHM(e.decidedAt) : ''}</span></div>
+      <div class="top"><span><span class="badge ${e.status}">${STATUS_TXT[e.status]}</span> &nbsp;${fmtHMS(e.at)}${e.by ? ` · ${esc(e.by)}` : ''}</span><span>${e.decidedAt ? 'decidido ' + fmtHM(e.decidedAt) : ''}</span></div>
       <div class="raw">${esc(e.raw)}</div>
       <div class="acts">
         ${e.status !== 'valid' ? `<button class="btn ok sm" data-ex="${e.id}" data-set="valid">✔ Dar por válido</button>` : ''}
@@ -805,7 +807,7 @@
     else if (m === 'force') forceUpdate();
     else if (m === 'reset') {
       if (await confirmSheet('¿Reiniciar los ingresos?', `Todos vuelven a figurar como “Faltan” y se borran los registros y las lecturas por verificar. La lista de asistentes se conserva.${sync.on ? ' <b>También se borran los ingresos de la hoja de Google y de los otros teléfonos.</b>' : ''}`, 'Reiniciar', true)) {
-        state.att.forEach((a) => { if (a.inAt) queueSet(a, false); a.inAt = null; a.via = null; a.by = null; }); state.extras = []; state.log = [];
+        state.att.forEach((a) => { if (a.inAt) queueSet(a, false); a.inAt = null; a.via = null; a.by = null; }); state.extras.forEach((ex) => queueExtra(ex, true)); state.extras = []; state.log = [];
         saveState(); renderAll(); toast('Ingresos reiniciados');
       }
     } else if (m === 'wipe') {
@@ -1228,7 +1230,7 @@
   window.addEventListener('storage', (e) => { if (e.key === STORAGE_KEY && e.newValue) { state = loadState(); idx = null; sIdx = null; applyLook(); applyBgLook(); renderAll(); } });
 
   /* ---------- Sincronización con Google Sheets ---------- */
-  const PROTO = 1;
+  const PROTO = 2;
   const syncErr = (code, msg) => { const e = new Error(msg || code); e.code = code; return e; };
   function syncErrText(e) {
     const m = {
@@ -1311,6 +1313,16 @@
     let lost = 0; const conflicts = []; let changed = false;
     ops.forEach((o) => {
       const r = byQ.get(o.q);
+      if (o.k === 'x') {
+        // si otro teléfono ya había anotado la misma lectura, se unifica con la fila que quedó en la hoja
+        if (r && r.ok && r.id && r.id !== o.id && !o.del) {
+          const loc = state.extras.find((e) => e.id === o.id); const otro = state.extras.find((e) => e.id === r.id);
+          if (loc && otro) state.extras = state.extras.filter((e) => e !== loc); else if (loc) loc.id = r.id;
+          sync.queue.forEach((q2) => { if (q2.k === 'x' && q2.id === o.id) q2.id = r.id; });
+          changed = true;
+        }
+        return;
+      }
       if (!r || !r.ok) { lost++; return; }
       if (o.v && r.already && !r.same) { const a = bySig.get(o.sig); if (a) conflicts.push({ a, r }); }
     });
@@ -1325,6 +1337,8 @@
       if (syncMarks(res.marks, false)) changed = true;
       sync.mh = res.mh;
     } else sync.mh = res.mh;
+    if (res.extras) { if (syncExtras(res.extras, false)) changed = true; }
+    sync.xh = res.xh;
     saveState();
     if (changed || lost || conflicts.length) renderAll();
     if (conflicts.length) {
@@ -1361,6 +1375,40 @@
     return ch;
   }
 
+  /** Aplica las lecturas no listadas de la hoja («No listados»), salvo las que este teléfono todavía no envió. Devuelve cuántas cambió. */
+  function syncExtras(list, quiet) {
+    const pend = new Set(sync.queue.filter((o) => o.k === 'x').map((o) => o.id));
+    const m = new Map(list.map((x) => [x.id, x]));
+    let ch = 0;
+    const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
+    const keep = state.extras.filter((e) => pend.has(e.id) || m.has(e.id));
+    ch += state.extras.length - keep.length;
+    state.extras = keep;
+    list.forEach((x) => {
+      if (pend.has(x.id)) return;
+      const ex = state.extras.find((e) => e.id === x.id);
+      if (!ex) {
+        const n = { id: x.id, raw: x.raw, at: iso(x.at) || new Date().toISOString(), status: x.st, decidedAt: iso(x.dat), via: 'sync', by: x.b || null };
+        state.extras.push(n); ch++;
+        if (!quiet) addLog(x.st === 'valid' ? 'val' : x.st === 'rejected' ? 'rej' : 'unl', { exId: n.id, raw: n.raw, via: 'sync', by: x.b, label: x.st === 'pending' ? `No figura en la lista (${x.b || 'otro teléfono'})` : `${x.st === 'valid' ? 'Ingreso válido' : 'Ingreso rechazado'} (no listado)` });
+      } else if (ex.status !== x.st) {
+        ex.status = x.st; ex.decidedAt = iso(x.dat); ch++;
+        if (!quiet) addLog(x.st === 'valid' ? 'val' : x.st === 'rejected' ? 'rej' : 'unl', { exId: ex.id, raw: ex.raw, via: 'sync', by: x.db, label: x.st === 'valid' ? 'Ingreso válido (no listado)' : x.st === 'rejected' ? 'Ingreso rechazado (no listado)' : 'Vuelto a pendiente' });
+      }
+    });
+    // el orden de la hoja es el orden de llegada
+    const order = new Map(list.map((x, i) => [x.id, i]));
+    state.extras.sort((a, b) => (order.has(a.id) ? order.get(a.id) : 1e9) - (order.has(b.id) ? order.get(b.id) : 1e9));
+    return ch;
+  }
+  /** Pone en cola el alta, el cambio de estado (o la baja) de una lectura no listada para escribirla en la hoja. */
+  function queueExtra(ex, del) {
+    if (!sync.on) return;
+    sync.queue = sync.queue.filter((o) => !(o.k === 'x' && o.id === ex.id) || net.sending.has(o.q));
+    sync.queue.push({ q: ++sync.seq, k: 'x', id: ex.id, raw: ex.raw, at: Date.parse(ex.at) || Date.now(), st: ex.status, dat: ex.decidedAt ? Date.parse(ex.decidedAt) : null, del: !!del, b: sync.device });
+    saveSync(); syncPillRender(); syncKick();
+  }
+
   /** Arma la lista local a partir de lo que devolvió el script. replace: primera conexión; si no, se fusiona conservando lo local pendiente. */
   function applyPull(d, replace) {
     const prevKey = state.headers[state.keyCol]; const prevNames = state.nameCols.map((i) => state.headers[i]);
@@ -1383,6 +1431,7 @@
       state.nameCols = nc.length ? nc : (tbl.rows.length ? guessNameCols(tbl) : [0]);
     }
     syncMarks(d.marks || [], replace);
+    syncExtras(d.extras || [], replace); sync.xh = d.xh;
     sync.lh = d.lh; sync.mh = d.mh; sync.sheet = d.hoja; sync.book = d.libro;
     state.fileName = `Hoja de Google: ${d.libro}`; state.importedAt = new Date().toISOString();
     idx = null; sIdx = null;
@@ -1439,9 +1488,9 @@
       const confirmConnect = (d) => {
         root.innerHTML = `<h2>Conectar con la hoja</h2>
           <p><b>${esc(d.libro)}</b> · pestaña «${esc(d.hoja)}»</p>
-          <p>${plural(d.rows.length, 'persona', 'personas')} en la lista${d.marks.length ? `, <b>${d.marks.length}</b> ya ingresadas` : ''}.</p>
+          <p>${plural(d.rows.length, 'persona', 'personas')} en la lista${d.marks.length ? `, <b>${d.marks.length}</b> ya ingresadas` : ''}${d.extras && d.extras.length ? `; ${plural(d.extras.length, 'lectura no listada', 'lecturas no listadas')} en la pestaña «No listados»` : ''}.</p>
           ${state.att.length ? `<p class="muted"><b>Atención:</b> la lista actual de este teléfono (${plural(state.att.length, 'persona', 'personas')}) se reemplaza por la de la hoja, junto con sus ingresos, registros y lecturas por verificar. Si querés conservar algo, exportalo antes.</p>` : ''}
-          <p class="muted">La hoja tiene las columnas INGRESADO, HORA INGRESO y REGISTRADO POR (el script las agrega si faltan). Desde ahora cada ingreso se escribe ahí y se comparte con los otros teléfonos.</p>
+          <p class="muted">La hoja tiene las columnas INGRESADO, HORA INGRESO y REGISTRADO POR (el script las agrega si faltan). Desde ahora cada ingreso se escribe ahí y se comparte con los otros teléfonos. Los QR que no figuran en la lista se anotan en la pestaña «No listados» (se crea si falta), con su estado.</p>
           <div class="sheet-actions"><button class="btn ghost" id="syC">Cancelar</button><button class="btn primary" id="syOk">Conectar y cargar la lista</button></div>`;
         $('#syC', root).onclick = closeSheet;
         $('#syOk', root).onclick = () => {

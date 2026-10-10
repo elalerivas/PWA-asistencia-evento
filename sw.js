@@ -1,7 +1,7 @@
 /* Service Worker — Control de Ingreso
    Precache de toda la app (incluidas las librerías) y "cache first" para funcionar 100 % sin conexión.
    Para publicar una actualización, cambiá VERSION: los dispositivos verán el aviso "Nueva versión disponible". */
-const VERSION = 'v1.2.0';
+const VERSION = 'v1.3.0';
 const CACHE = `control-ingreso-${VERSION}`;
 
 const ASSETS = [

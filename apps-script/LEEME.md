@@ -39,13 +39,17 @@ Arriba, junto al nombre del evento, aparece **Sincronizado**. Si no hay señal d
 - **Desde la hoja:** escribir `SI` en INGRESADO marca a esa persona como ingresada; borrar la celda le quita el ingreso. Cambia en los teléfonos a los pocos segundos.
 - **Lista que cambia:** si la otra aplicación agrega personas a la hoja, aparecen solas en la app. **Probalo antes del evento** generando un QR de prueba y verificando que las columnas INGRESADO / HORA INGRESO / REGISTRADO POR no se borran.
 - **Títulos:** el script detecta solo la fila de títulos. Si tu hoja tiene varias pestañas, poné el nombre de la que tiene la lista en `HOJA` (arriba en el código).
-- **Lo que no se comparte:** los QR **no listados** (los de «Por verificar») y las decisiones de válido/rechazado quedan en cada teléfono.
+- **QR que no figuran en la lista:** se anotan en una pestaña aparte, **«No listados»** (la crea el script; la lista original no se toca). Cada fila trae lo leído en el QR, la hora, el **estado** (Por verificar / Válido / Rechazado), cuándo se decidió y qué teléfono lo leyó y lo decidió. Aparecen en «Por verificar» de **todos** los teléfonos y la decisión vale para todos. Si la misma lectura entra por dos puertas a la vez, queda una sola fila. También podés cambiar ESTADO a mano en la hoja.
 - **Frecuencia:** por defecto cada 5 segundos. Con 4 o más teléfonos conviene 10 segundos (*Menú → Sincronización → Consultar la hoja cada*).
-- **Reiniciar ingresos** en un teléfono sincronizado también borra los ingresos de la hoja y de los otros teléfonos.
+- **Reiniciar ingresos** en un teléfono sincronizado también borra los ingresos de la hoja y de los otros teléfonos, y vacía la pestaña «No listados».
 
 ## Seguridad
 
 La dirección del script es pública, pero sin la clave no devuelve nada. No la publiques junto con la clave. Si sospechás que se filtró: cambiá la clave en el script y volvé a implementar (*Implementar → Administrar implementaciones → ✏ → Versión: Nueva versión*); la URL no cambia. Para cortar el acceso del todo: *Administrar implementaciones → Archivar*.
+
+## Si ya habías instalado una versión anterior del script
+
+Esta versión agrega la pestaña «No listados». Pegá el `Code.gs` nuevo en lugar del viejo (volvé a poner **tu clave**), hacé *Implementar → Administrar implementaciones → ✏ → Versión: Nueva versión → Implementar* y actualizá la app en los teléfonos. La URL no cambia. Hasta que las dos cosas estén al día, la app avisa «El script instalado es de otra versión».
 
 ## Si cambiás el código del script
 
@@ -58,5 +62,5 @@ Guardá, y en *Implementar → Administrar implementaciones* editá la implement
 | «No se pudo conectar con el script» | La URL tiene que terminar en `/exec`, el acceso debe ser *Cualquier persona* y el teléfono necesita señal. |
 | «La clave no coincide» | Es la `CLAVE` del código, sin espacios; si la cambiaste, hay que hacer una *nueva versión*. |
 | «En el script todavía está la clave de ejemplo» | Cambiá `cambiar-esta-clave` y volvé a implementar. |
-| «El script instalado es de otra versión» | Pegá de nuevo el `Code.gs` de esta versión de la app y hacé una nueva versión. |
+| «El script instalado es de otra versión» | El script y la app tienen que ser de la misma versión: pegá el `Code.gs` nuevo y hacé una nueva versión, y actualizá la app en los teléfonos. |
 | No aparece la lista / otra pestaña | Poné el nombre de la pestaña en `HOJA`. |

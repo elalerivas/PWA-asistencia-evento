@@ -51,7 +51,7 @@ Si la lista está en una **hoja de Google**, varios teléfonos pueden compartir 
 Hace falta instalar una vez el script de `apps-script/Code.gs` en la hoja (no hay servidor ni cuentas extra: corre en tu cuenta de Google). **Guía paso a paso: [`apps-script/LEEME.md`](apps-script/LEEME.md).** Después, en cada teléfono: *Menú → Sincronizar con Google Sheets*.
 
 - Sin conexión la app sigue registrando y envía lo pendiente al volver la señal.
-- Los QR no listados y su decisión (válido/rechazado) se quedan en cada teléfono.
+- Los QR que no figuran en la lista se anotan en la pestaña **«No listados»** de la misma hoja (con estado Por verificar / Válido / Rechazado, hora y teléfono) y se comparten entre todos los teléfonos. La lista original no se modifica.
 - Sin sincronización la app funciona igual que antes, todo en el dispositivo.
 
 ## Apariencia
